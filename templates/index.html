@@ -1,0 +1,254 @@
+{% extends "base.html" %}
+{% block content %}
+
+{# ---- 排序辅助宏 ---- #}
+{% macro sort_link(col, label) %}
+  {% if sort_by == col %}
+    {% if sort_dir == 'asc' %}
+      <a href="/?sort={{ col }}&dir=desc" class="text-decoration-none text-dark fw-bold">
+        {{ label }} <span style="font-size:11px;">▲</span>
+      </a>
+    {% else %}
+      <a href="/?sort={{ col }}&dir=asc" class="text-decoration-none text-dark fw-bold">
+        {{ label }} <span style="font-size:11px;">▼</span>
+      </a>
+    {% endif %}
+  {% else %}
+    <a href="/?sort={{ col }}&dir=asc" class="text-decoration-none text-secondary">
+      {{ label }} <span style="font-size:11px; opacity:0.4;">⇅</span>
+    </a>
+  {% endif %}
+{% endmacro %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+        <h4 class="d-inline-block me-3 mb-0">被控端列表</h4>
+        <!-- 状态统计标签 -->
+        <span class="badge bg-primary px-2 py-2 me-1" style="font-size: 14px;">总计: {{ stats.total }} 台</span>
+        <span class="badge bg-success px-2 py-2 me-1" style="font-size: 14px;">在线: {{ stats.online }} 台</span>
+        <span class="badge bg-danger px-2 py-2 me-1" style="font-size: 14px;">离线: {{ stats.offline }} 台</span>
+        {% if stats.unknown > 0 %}
+        <span class="badge bg-secondary px-2 py-2" style="font-size: 14px;">探测中: {{ stats.unknown }} 台</span>
+        {% endif %}
+    </div>
+    <div class="d-flex align-items-center gap-2">
+        <!-- 自动刷新下拉框 -->
+        <div class="btn-group">
+            <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" id="refreshBtn">
+                自动刷新
+            </button>
+            <ul class="dropdown-menu dropdown-menu-end" id="refreshMenu">
+                <li><a class="dropdown-item" href="#" data-sec="0">不刷新</a></li>
+                <li><a class="dropdown-item" href="#" data-sec="10">10 秒刷新</a></li>
+                <li><a class="dropdown-item" href="#" data-sec="30">30 秒刷新</a></li>
+                <li><a class="dropdown-item" href="#" data-sec="60">60 秒刷新</a></li>
+            </ul>
+        </div>
+        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addDeviceModal">添加被控端</button>
+    </div>
+</div>
+
+<script>
+var _refreshTimer = null;
+var REFRESH_KEY = 'snmp_refresh_interval';
+
+var LABELS = {0: '自动刷新', 10: '10 秒刷新', 30: '30 秒刷新', 60: '60 秒刷新'};
+
+function setRefresh(seconds) {
+    if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
+    localStorage.setItem(REFRESH_KEY, seconds);
+    updateRefreshUI(seconds);
+    if (seconds > 0) {
+        _refreshTimer = setInterval(function(){ location.reload(); }, seconds * 1000);
+    }
+}
+
+function updateRefreshUI(seconds) {
+    document.getElementById('refreshBtn').textContent = LABELS[seconds] || '自动刷新';
+    var items = document.querySelectorAll('#refreshMenu .dropdown-item');
+    items.forEach(function(item) {
+        var sec = parseInt(item.getAttribute('data-sec'));
+        item.classList.toggle('active', sec === seconds);
+    });
+}
+
+// 绑定点击事件
+document.querySelectorAll('#refreshMenu .dropdown-item').forEach(function(item) {
+    item.addEventListener('click', function(e) {
+        e.preventDefault();
+        setRefresh(parseInt(this.getAttribute('data-sec')));
+    });
+});
+
+// 页面加载时恢复上次选择的刷新间隔
+(function() {
+    var saved = parseInt(localStorage.getItem(REFRESH_KEY));
+    if (saved > 0) {
+        updateRefreshUI(saved);
+        _refreshTimer = setInterval(function(){ location.reload(); }, saved * 1000);
+    } else {
+        updateRefreshUI(0);
+    }
+})();
+</script>
+
+<div class="card shadow-sm">
+    <div class="card-body">
+        <table class="table table-hover align-middle">
+            <thead class="table-light">
+                <tr>
+                    <th>{{ sort_link('name',    '名称') }}</th>
+                    <th>{{ sort_link('ip',      'IP地址') }}</th>
+                    <th>{{ sort_link('os_type', '系统类型') }}</th>
+                    <th>{{ sort_link('status',  '状态') }}</th>
+                    <th>{{ sort_link('cpu_usage', 'CPU使用率') }}</th>
+                    <th>{{ sort_link('mem_usage', '内存使用率') }}</th>
+                    <th>磁盘使用率 (分区)</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for dev in devices.items %}
+                {% set data = latest_data[dev.id] %}
+                <tr>
+                    <td><strong>{{ dev.name or '-' }}</strong></td>
+                    <td>{{ dev.ip }}</td>
+                    <td>{{ dev.os_type | upper }}</td>
+                    <td>
+                        {% if dev.status == 'online' %}
+                            <span class="badge bg-success">在线</span>
+                        {% elif dev.status == 'unknown' %}
+                            <span class="badge bg-secondary">探测中</span>
+                        {% else %}
+                            <span class="badge bg-danger">离线</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if data %}
+                        <div class="progress"><div class="progress-bar {% if data.cpu_usage > 90 %}bg-danger{% endif %}" style="width: {{ data.cpu_usage }}%;">{{ data.cpu_usage }}%</div></div>
+                        {% else %}-{% endif %}
+                    </td>
+                    <td>
+                        {% if data %}
+                        <div class="progress"><div class="progress-bar bg-info {% if data.mem_usage > 90 %}bg-danger{% endif %}" style="width: {{ data.mem_usage }}%;">{{ data.mem_usage }}%</div></div>
+                        {% else %}-{% endif %}
+                    </td>
+                    <td>
+                        {% if data and data.disk_data %}
+                            <div class="d-flex flex-column gap-1">
+                            <script>
+                                var disks = {{ data.disk_data | safe }};
+                                disks.forEach(d => {
+                                    document.write(`<div class="d-flex align-items-center"><span style="width:40px; font-size:12px;">${d.name}</span>
+                                    <div class="progress flex-grow-1" style="height: 15px;"><div class="progress-bar bg-warning" style="width: ${d.usage}%;">${d.usage}%</div></div></div>`);
+                                });
+                            </script>
+                            </div>
+                        {% else %}-{% endif %}
+                    </td>
+                    <td>
+                        <div class="btn-group" role="group">
+                            <a href="/history/{{ dev.id }}" class="btn btn-sm btn-outline-primary">图表</a>
+                            
+                            <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="modal" data-bs-target="#editModal{{ dev.id }}">
+                                配置
+                            </button>
+
+                            <form action="/device/delete/{{ dev.id }}" method="POST" style="display: inline-block; margin-left: 5px;">
+                                <button type="submit" class="btn btn-sm btn-outline-danger" 
+                                    onclick="return confirm('确定要删除被控端 {{ dev.ip }} 吗？');">删除</button>
+                            </form>
+                        </div>
+
+                        <!-- 单台设备配置 Modal -->
+                        <div class="modal fade" id="editModal{{ dev.id }}" tabindex="-1">
+                            <div class="modal-dialog">
+                                <form class="modal-content" method="POST" action="/device/edit/{{ dev.id }}">
+                                    <div class="modal-header"><h5 class="modal-title">配置设备 [{{ dev.ip }}]</h5></div>
+                                    <div class="modal-body">
+                                        <div class="mb-3">
+                                            <label>设备名称</label>
+                                            <input type="text" name="name" class="form-control" value="{{ dev.name }}">
+                                        </div>
+                                        <div class="mb-3">
+                                            <label>IP 地址</label>
+                                            <input type="text" name="ip" class="form-control" value="{{ dev.ip }}" required>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label>系统类型</label>
+                                            <select name="os_type" class="form-select">
+                                                <option value="linux" {% if dev.os_type == 'linux' %}selected{% endif %}>Linux</option>
+                                                <option value="windows" {% if dev.os_type == 'windows' %}selected{% endif %}>Windows</option>
+                                                <option value="other" {% if dev.os_type == 'other' %}selected{% endif %}>其他</option>
+                                            </select>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label>团体字</label>
+                                            <input type="text" name="community" class="form-control" value="{{ dev.community }}">
+                                        </div>
+                                        <div class="alert alert-info" style="font-size: 13px;">
+                                            提示：以下阈值填 <b>0</b> 表示使用系统的全局阈值。
+                                        </div>
+                                        <div class="mb-3">
+                                            <label>独立 CPU 报警阈值 (%)</label>
+                                            <input type="number" name="cpu_threshold" class="form-control" value="{{ dev.cpu_threshold }}">
+                                        </div>
+                                        <div class="mb-3">
+                                            <label>独立 内存 报警阈值 (%)</label>
+                                            <input type="number" name="mem_threshold" class="form-control" value="{{ dev.mem_threshold }}">
+                                        </div>
+                                        <div class="mb-3">
+                                            <label>独立 硬盘 报警阈值 (%)</label>
+                                            <input type="number" name="disk_threshold" class="form-control" value="{{ dev.disk_threshold }}">
+                                        </div>
+                                    </div>
+                                    <div class="modal-footer">
+                                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                                        <button type="submit" class="btn btn-primary">保存修改</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        
+        <!-- 分页（保留排序参数） -->
+        <nav>
+            <ul class="pagination justify-content-center">
+                {% if devices.has_prev %}
+                <li class="page-item"><a class="page-link" href="/?page={{ devices.prev_num }}&sort={{ sort_by }}&dir={{ sort_dir }}">上一页</a></li>
+                {% endif %}
+                <li class="page-item disabled"><a class="page-link">第 {{ devices.page }} 页 / 共 {{ devices.pages }} 页</a></li>
+                {% if devices.has_next %}
+                <li class="page-item"><a class="page-link" href="/?page={{ devices.next_num }}&sort={{ sort_by }}&dir={{ sort_dir }}">下一页</a></li>
+                {% endif %}
+            </ul>
+        </nav>
+    </div>
+</div>
+
+<!-- 添加设备 Modal -->
+<div class="modal fade" id="addDeviceModal" tabindex="-1">
+    <div class="modal-dialog">
+        <form class="modal-content" method="POST" action="/device/add">
+            <div class="modal-header"><h5 class="modal-title">添加被控端</h5></div>
+            <div class="modal-body">
+                <div class="mb-3"><label>设备名称 (备注)</label><input type="text" name="name" class="form-control" placeholder="如：Web服务器 1"></div>
+                <div class="mb-3"><label>IP 地址</label><input type="text" name="ip" class="form-control" required></div>
+                <div class="mb-3"><label>SNMP 团体字 (Community)</label><input type="text" name="community" class="form-control" value="hxu"></div>
+                <div class="mb-3"><label>系统类型</label>
+                    <select name="os_type" class="form-select">
+                        <option value="linux">Linux</option>
+                        <option value="windows">Windows</option>
+                        <option value="other">其他</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer"><button type="submit" class="btn btn-primary">保存</button></div>
+        </form>
+    </div>
+</div>
+{% endblock %}

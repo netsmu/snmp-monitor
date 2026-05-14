@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-8">
+        <div class="card shadow-sm">
+            <div class="card-header bg-white"><h5>系统全局配置</h5></div>
+            <div class="card-body">
+                <form method="POST">
+                    <div class="row mb-3">
+                        <div class="col"><label>轮询间隔 (秒)</label><input type="number" name="interval" class="form-control" value="{{ configs.interval }}"></div>
+                        <div class="col"><label>每页显示机器数</label><input type="number" name="per_page" class="form-control" value="{{ configs.per_page }}"></div>
+                    </div>
+                    <div class="row mb-3">
+                        <div class="col"><label>全局CPU报警阈值(%)</label><input type="number" name="global_cpu" class="form-control" value="{{ configs.global_cpu }}"></div>
+                        <div class="col"><label>全局内存报警阈值(%)</label><input type="number" name="global_mem" class="form-control" value="{{ configs.global_mem }}"></div>
+                        <div class="col"><label>全局硬盘报警阈值(%)</label><input type="number" name="global_disk" class="form-control" value="{{ configs.global_disk }}"></div>
+                    </div>
+                    <div class="row mb-3">
+                        <div class="col"><label>连续几次无响应判定离线</label><input type="number" name="max_fails" class="form-control" value="{{ configs.max_fails }}"></div>
+                        <div class="col"><label>历史数据保留 (天)</label><input type="number" name="retention_days" class="form-control" value="{{ configs.retention_days }}"></div>
+                    </div>
+
+                    <hr class="my-3">
+                    <h6 class="mb-3 text-muted">企业微信群机器人通知（填写即生效，最多支持 2 个）</h6>
+
+                    <div class="mb-3">
+                        <label>企业微信群机器人 Webhook URL（第 1 个）</label>
+                        <input type="text" name="wechat_webhook" class="form-control"
+                               value="{{ configs.wechat_webhook }}"
+                               placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...">
+                    </div>
+                    <div class="mb-3">
+                        <label>企业微信群机器人 Webhook URL（第 2 个，选填）</label>
+                        <input type="text" name="wechat_webhook2" class="form-control"
+                               value="{{ configs.wechat_webhook2 }}"
+                               placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...">
+                        <div class="form-text text-muted">填写两个即同时推送到两个群，留空则跳过该路。</div>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary w-100">保存配置并立即生效</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
