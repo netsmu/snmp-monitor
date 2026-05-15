@@ -1,26 +1,47 @@
 {% extends "base.html" %}
 {% block content %}
 
-{# ---- 排序辅助宏 ---- #}
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+    <div class="mb-3">
+    {% for category, msg in messages %}
+      <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+        {{ msg }}
+        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+      </div>
+    {% endfor %}
+    </div>
+  {% endif %}
+{% endwith %}
+
+{# ---- 排序辅助宏（保留搜索参数 q） ---- #}
 {% macro sort_link(col, label) %}
   {% if sort_by == col %}
     {% if sort_dir == 'asc' %}
-      <a href="/?sort={{ col }}&dir=desc" class="text-decoration-none text-dark fw-bold">
+      <a href="/?q={{ q }}&sort={{ col }}&dir=desc" class="text-decoration-none text-dark fw-bold">
         {{ label }} <span style="font-size:11px;">▲</span>
       </a>
     {% else %}
-      <a href="/?sort={{ col }}&dir=asc" class="text-decoration-none text-dark fw-bold">
+      <a href="/?q={{ q }}&sort={{ col }}&dir=asc" class="text-decoration-none text-dark fw-bold">
         {{ label }} <span style="font-size:11px;">▼</span>
       </a>
     {% endif %}
   {% else %}
-    <a href="/?sort={{ col }}&dir=asc" class="text-decoration-none text-secondary">
+    <a href="/?q={{ q }}&sort={{ col }}&dir=asc" class="text-decoration-none text-secondary">
       {{ label }} <span style="font-size:11px; opacity:0.4;">⇅</span>
     </a>
   {% endif %}
 {% endmacro %}
 
+<!-- 搜索框 -->
 <div class="d-flex justify-content-between align-items-center mb-3">
+    <form class="d-flex" method="GET" action="/">
+        <input class="form-control me-2" type="search" name="q" placeholder="搜索名称或IP地址..." value="{{ q }}" style="max-width: 280px;" aria-label="搜索">
+        <button class="btn btn-outline-primary" type="submit">搜索</button>
+        {% if q %}
+        <a href="/" class="btn btn-outline-secondary ms-2">清除</a>
+        {% endif %}
+    </form>
     <div>
         <h4 class="d-inline-block me-3 mb-0">被控端列表</h4>
         <!-- 状态统计标签 -->
@@ -139,8 +160,8 @@ document.querySelectorAll('#refreshMenu .dropdown-item').forEach(function(item) 
                             <script>
                                 var disks = {{ data.disk_data | safe }};
                                 disks.forEach(d => {
-                                    document.write(`<div class="d-flex align-items-center"><span style="width:40px; font-size:12px;">${d.name}</span>
-                                    <div class="progress flex-grow-1" style="height: 15px;"><div class="progress-bar bg-warning" style="width: ${d.usage}%;">${d.usage}%</div></div></div>`);
+                                    document.write(`<div class="d-flex align-items-center"><span style="width:50px;height:10px; font-size:12px;">${d.name}</span>
+                                    <div class="progress flex-grow-1" style="height: 10px;"><div class="progress-bar bg-warning" style="width: ${d.usage}%;">${d.usage}%</div></div></div>`);
                                 });
                             </script>
                             </div>
@@ -219,11 +240,11 @@ document.querySelectorAll('#refreshMenu .dropdown-item').forEach(function(item) 
         <nav>
             <ul class="pagination justify-content-center">
                 {% if devices.has_prev %}
-                <li class="page-item"><a class="page-link" href="/?page={{ devices.prev_num }}&sort={{ sort_by }}&dir={{ sort_dir }}">上一页</a></li>
+                <li class="page-item"><a class="page-link" href="/?q={{ q }}&page={{ devices.prev_num }}&sort={{ sort_by }}&dir={{ sort_dir }}">上一页</a></li>
                 {% endif %}
                 <li class="page-item disabled"><a class="page-link">第 {{ devices.page }} 页 / 共 {{ devices.pages }} 页</a></li>
                 {% if devices.has_next %}
-                <li class="page-item"><a class="page-link" href="/?page={{ devices.next_num }}&sort={{ sort_by }}&dir={{ sort_dir }}">下一页</a></li>
+                <li class="page-item"><a class="page-link" href="/?q={{ q }}&page={{ devices.next_num }}&sort={{ sort_by }}&dir={{ sort_dir }}">下一页</a></li>
                 {% endif %}
             </ul>
         </nav>
