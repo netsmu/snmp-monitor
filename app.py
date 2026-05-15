@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import threading
 import requests
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
@@ -14,11 +15,12 @@ app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///monitor.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.secret_key = os.urandom(24)  # flash 消息依赖 session，需要 secret_key
 
-# 高并发数据库连接池配置，防止 QueuePool 溢出崩溃
+# 高并发数据库连接池配置
+# 轮询已改为批量写入（1次commit/轮），连接池压力大幅降低
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    'pool_size': 50,
-    'max_overflow': 100,
-    'pool_timeout': 60
+    'pool_size': 10,
+    'max_overflow': 30,
+    'pool_timeout': 30
 }
 
 db = SQLAlchemy(app)
@@ -50,6 +52,19 @@ class History(db.Model):
     disk_data = db.Column(db.Text) 
 
 alert_cache = {}
+
+# 线程级 SnmpEngine 复用（同一轮采集内复用，每轮结束后清理防止内存泄漏）
+# 注意：ThreadPoolExecutor 每轮创建新线程，旧的线程 ID 不会再复用，
+#        如果不清理会导致 SnmpEngine 实例无限累积，每轮约泄漏 100 个实例
+_snmp_engine_cache = {}
+_engine_lock = threading.Lock()
+
+def _get_snmp_engine():
+    thread_id = threading.current_thread().ident
+    with _engine_lock:
+        if thread_id not in _snmp_engine_cache:
+            _snmp_engine_cache[thread_id] = SnmpEngine()
+        return _snmp_engine_cache[thread_id]
 
 # 修改：默认历史记录保留天数改为 180 天
 DEFAULT_CONFIG = {
@@ -100,9 +115,9 @@ def check_and_alert(device, metric_name, current_val, global_thresh, custom_thre
     dev_label = f"{device.name}({device.ip})" if device.name else device.ip
     
     if current_val >= thresh:
-        if cache_key not in alert_cache or (time.time() - alert_cache[cache_key] > 3600):
+        if cache_key not in alert_cache:
             send_wechat_alert(f"设备 [{dev_label}] {metric_name} 使用率过高: {current_val}% (阈值: {thresh}%)")
-            alert_cache[cache_key] = time.time()
+            alert_cache[cache_key] = True
     else:
         if cache_key in alert_cache:
             send_wechat_alert(f"设备 [{dev_label}] {metric_name} 使用率已恢复正常: {current_val}%", "info")
@@ -114,12 +129,13 @@ def fetch_real_snmp_data(ip, community):
     cpu_cores = []
     mem_usage = 0.0
     disk_data = []
+    snmp_engine = _get_snmp_engine()
 
     # 1. 获取 CPU
     for (errorIndication, errorStatus, errorIndex, varBinds) in nextCmd(
-        SnmpEngine(),
+        snmp_engine,
         CommunityData(community, mpModel=1),
-        UdpTransportTarget((ip, 161), timeout=3, retries=2),
+        UdpTransportTarget((ip, 161), timeout=2, retries=1),
         ContextData(),
         ObjectType(ObjectIdentity('1.3.6.1.2.1.25.3.3.1.2')),
         lexicographicMode=False
@@ -152,9 +168,9 @@ def fetch_real_snmp_data(ip, community):
     available_kb  = 0.0   # Available Memory（部分系统才有）
 
     for (errorIndication, errorStatus, errorIndex, varBinds) in nextCmd(
-        SnmpEngine(),
+        snmp_engine,
         CommunityData(community, mpModel=1),
-        UdpTransportTarget((ip, 161), timeout=3, retries=2),
+        UdpTransportTarget((ip, 161), timeout=2, retries=1),
         ContextData(),
         ObjectType(ObjectIdentity('1.3.6.1.2.1.25.2.3.1.2')),  # hrStorageType
         ObjectType(ObjectIdentity('1.3.6.1.2.1.25.2.3.1.3')),  # hrStorageDescr
@@ -231,58 +247,77 @@ def fetch_real_snmp_data(ip, community):
     return cpu_usage, mem_usage, disk_data
 
 
-# ================= 轮询调度逻辑（网络与数据库解耦，防止连接池耗尽崩溃） =================
+# ================= 轮询调度逻辑（网络与数据库解耦，批量写入减少 SQLite 锁竞争） =================
 def poll_device_task(dev_id, ip, name, community, cpu_t, mem_t, disk_t):
-    """先发网络请求（不锁数据库），获取完毕后再打开数据库瞬间写入"""
-    # 1. 纯网络请求（耗时操作，不占用数据库连接）
+    """纯网络采集，不操作数据库，返回采集结果"""
     try:
         cpu_usage, mem_usage, disk_data = fetch_real_snmp_data(ip, community)
-        success = True
-        error_msg = ""
+        return (dev_id, ip, name, cpu_usage, mem_usage, disk_data, cpu_t, mem_t, disk_t, True, "")
     except Exception as e:
-        success = False
-        error_msg = str(e)
-        cpu_usage, mem_usage, disk_data = 0.0, 0.0, []
-
-    # 2. 网络获取完毕，打开数据库瞬间写入并提交
-    with app.app_context():
-        device = db.session.get(Device, dev_id)
-        if not device: return
-
-        if success:
-            if device.status in ['offline', 'unknown']:
-                dev_label = f"{name}({ip})" if name else ip
-                send_wechat_alert(f"设备 [{dev_label}] 已恢复通信，重新上线！", "info")
-            device.status = 'online'
-            device.fail_count = 0
-
-            g_cpu, g_mem, g_disk = get_config('global_cpu'), get_config('global_mem'), get_config('global_disk')
-            check_and_alert(device, "CPU", cpu_usage, g_cpu, cpu_t)
-            check_and_alert(device, "内存", mem_usage, g_mem, mem_t)
-            for d in disk_data:
-                check_and_alert(device, f"硬盘({d['name']})", d['usage'], g_disk, disk_t)
-
-            hist = History(device_id=device.id, cpu_usage=cpu_usage, mem_usage=mem_usage, disk_data=json.dumps(disk_data))
-            db.session.add(hist)
-        else:
-            device.fail_count += 1
-            max_fails = get_config('max_fails')
-            if device.fail_count >= max_fails and device.status in ['online', 'unknown']:
-                device.status = 'offline'
-                dev_label = f"{name}({ip})" if name else ip
-                send_wechat_alert(f"设备 [{dev_label}] 查询失败 {max_fails} 次，离线！\n> {error_msg}", "warning")
-
-        db.session.commit()
+        return (dev_id, ip, name, 0.0, 0.0, [], cpu_t, mem_t, disk_t, False, str(e))
 
 def poll_all_devices():
-    # 先快速取出设备信息，释放数据库连接，再交给线程池执行网络请求
+    # 1. 快速取出设备信息，释放数据库连接
     with app.app_context():
         devices = Device.query.all()
         tasks = [(d.id, d.ip, d.name, d.community, d.cpu_threshold, d.mem_threshold, d.disk_threshold) for d in devices]
+        # 提前读取全局阈值（避免批量写入时反复查 Config 表）
+        g_cpu = get_config('global_cpu')
+        g_mem = get_config('global_mem')
+        g_disk = get_config('global_disk')
+        max_fails = get_config('max_fails')
 
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        for task in tasks:
-            executor.submit(poll_device_task, *task)
+    # 2. 每轮采集前清理上轮遗留的 SnmpEngine 缓存，防止内存泄漏
+    #    （ThreadPoolExecutor 每轮创建新线程，旧线程的实例无法回收）
+    with _engine_lock:
+        _snmp_engine_cache.clear()
+
+    # 3. 并发采集（纯网络，不碰数据库）
+    from concurrent.futures import as_completed
+    all_results = []
+    with ThreadPoolExecutor(max_workers=100) as executor:
+        futures = {executor.submit(poll_device_task, *task): task for task in tasks}
+        for future in as_completed(futures, timeout=60):
+            try:
+                result = future.result(timeout=30)
+                if result:
+                    all_results.append(result)
+            except Exception:
+                pass
+
+    # 3. 统一批量写入数据库（1 次 commit，减少 SQLite 写锁竞争）
+    if not all_results:
+        return
+
+    with app.app_context():
+        for (dev_id, ip, name, cpu_usage, mem_usage, disk_data,
+             cpu_t, mem_t, disk_t, success, error_msg) in all_results:
+            device = db.session.get(Device, dev_id)
+            if not device:
+                continue
+
+            if success:
+                if device.status in ['offline', 'unknown']:
+                    dev_label = f"{name}({ip})" if name else ip
+                    send_wechat_alert(f"设备 [{dev_label}] 已恢复通信，重新上线！", "info")
+                device.status = 'online'
+                device.fail_count = 0
+
+                check_and_alert(device, "CPU", cpu_usage, g_cpu, cpu_t)
+                check_and_alert(device, "内存", mem_usage, g_mem, mem_t)
+                for d in disk_data:
+                    check_and_alert(device, f"硬盘({d['name']})", d['usage'], g_disk, disk_t)
+
+                hist = History(device_id=device.id, cpu_usage=cpu_usage, mem_usage=mem_usage, disk_data=json.dumps(disk_data))
+                db.session.add(hist)
+            else:
+                device.fail_count += 1
+                if device.fail_count >= max_fails and device.status in ['online', 'unknown']:
+                    device.status = 'offline'
+                    dev_label = f"{name}({ip})" if name else ip
+                    send_wechat_alert(f"设备 [{dev_label}] 查询失败 {max_fails} 次，离线！\n> {error_msg}", "warning")
+
+        db.session.commit()  # 一次性提交所有设备的采集结果
 
 def clean_old_history():
     with app.app_context():
@@ -303,6 +338,24 @@ def update_scheduler_interval(new_interval):
     scheduler.reschedule_job('poll_job', trigger='interval', seconds=new_interval)
 
 # ================= Web 路由 =================
+
+def _batch_latest_history(device_ids):
+    """批量获取多台设备的最新历史记录，避免 N+1 查询"""
+    if not device_ids:
+        return {}
+    from sqlalchemy import func
+    subq = (
+        db.session.query(
+            History.device_id,
+            func.max(History.id).label('max_id')
+        )
+        .filter(History.device_id.in_(device_ids))
+        .group_by(History.device_id)
+        .subquery()
+    )
+    rows = db.session.query(History).join(subq, History.id == subq.c.max_id).all()
+    return {h.device_id: h for h in rows}
+
 @app.route('/')
 def index():
     page = request.args.get('page', 1, type=int)
@@ -340,12 +393,10 @@ def index():
 
     # CPU / 内存排序需要联合 History 表，单独处理
     if sort_by in ('cpu_usage', 'mem_usage'):
-        # 先拉所有设备，再用最新 History 数据排序（数据量不大，内存排序可接受）
+        # 批量获取最新历史（消除 N+1）
         all_devices = base_query.all()
-        latest_map = {}
-        for dev in all_devices:
-            hist = History.query.filter_by(device_id=dev.id).order_by(History.id.desc()).first()
-            latest_map[dev.id] = hist
+        device_ids = [d.id for d in all_devices]
+        latest_map = _batch_latest_history(device_ids)
 
         def sort_key(dev):
             h = latest_map.get(dev.id)
@@ -377,18 +428,18 @@ def index():
         latest_data = latest_map
     else:
         devices = base_query.order_by(order_expr).paginate(page=page, per_page=per_page, error_out=False)
-        latest_data = {}
-        for dev in devices.items:
-            hist = History.query.filter_by(device_id=dev.id).order_by(History.id.desc()).first()
-            latest_data[dev.id] = hist
+        # 批量获取当前页设备的最新历史（消除 N+1）
+        page_ids = [d.id for d in devices.items]
+        latest_data = _batch_latest_history(page_ids)
 
-    # ======= 统计设备状态数量 =======
-    stats = {
-        'total':   Device.query.count(),
-        'online':  Device.query.filter_by(status='online').count(),
-        'offline': Device.query.filter_by(status='offline').count(),
-        'unknown': Device.query.filter_by(status='unknown').count()
-    }
+    # ======= 统计设备状态数量（1 次 GROUP BY 代替 4 次 COUNT） =======
+    from sqlalchemy import func
+    status_counts = db.session.query(Device.status, func.count(Device.id)).group_by(Device.status).all()
+    stats = {'total': 0, 'online': 0, 'offline': 0, 'unknown': 0}
+    for status, count in status_counts:
+        stats['total'] += count
+        if status in stats:
+            stats[status] = count
 
     return render_template('index.html', devices=devices, latest_data=latest_data,
                            stats=stats, sort_by=sort_by, sort_dir=sort_dir, q=q)
