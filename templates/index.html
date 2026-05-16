@@ -15,19 +15,19 @@
 {% endwith %}
 
 {# ---- 排序辅助宏（保留搜索参数 q） ---- #}
-{% macro sort_link(col, label) %}
+{% macro sort_link(col, label, default_desc=true) %}
   {% if sort_by == col %}
     {% if sort_dir == 'asc' %}
-      <a href="/?q={{ q }}&sort={{ col }}&dir=desc" class="text-decoration-none text-dark fw-bold">
+      <a href="/?q={{ q }}&sort={{ col }}&dir=desc" class="text-decoration-none text-dark fw-bold" title="点击切换为降序">
         {{ label }} <span style="font-size:11px;">▲</span>
       </a>
     {% else %}
-      <a href="/?q={{ q }}&sort={{ col }}&dir=asc" class="text-decoration-none text-dark fw-bold">
+      <a href="/?q={{ q }}&sort={{ col }}&dir=asc" class="text-decoration-none text-dark fw-bold" title="点击切换为升序">
         {{ label }} <span style="font-size:11px;">▼</span>
       </a>
     {% endif %}
   {% else %}
-    <a href="/?q={{ q }}&sort={{ col }}&dir=asc" class="text-decoration-none text-secondary">
+    <a href="/?q={{ q }}&sort={{ col }}&dir={% if default_desc %}desc{% else %}asc{% endif %}" class="text-decoration-none text-secondary" title="点击排序">
       {{ label }} <span style="font-size:11px; opacity:0.4;">⇅</span>
     </a>
   {% endif %}
@@ -118,13 +118,13 @@ document.querySelectorAll('#refreshMenu .dropdown-item').forEach(function(item) 
         <table class="table table-hover align-middle">
             <thead class="table-light">
                 <tr>
-                    <th>{{ sort_link('name',    '名称') }}</th>
-                    <th>{{ sort_link('ip',      'IP地址') }}</th>
-                    <th>{{ sort_link('os_type', '系统类型') }}</th>
-                    <th>{{ sort_link('status',  '状态') }}</th>
+                    <th>{{ sort_link('name',    '名称', default_desc=false) }}</th>
+                    <th>{{ sort_link('ip',      'IP地址', default_desc=false) }}</th>
+                    <th>{{ sort_link('os_type', '系统类型', default_desc=false) }}</th>
+                    <th>{{ sort_link('status',  '状态', default_desc=false) }}</th>
                     <th>{{ sort_link('cpu_usage', 'CPU使用率') }}</th>
                     <th>{{ sort_link('mem_usage', '内存使用率') }}</th>
-                    <th>磁盘使用率 (分区)</th>
+                    <th>{{ sort_link('disk_usage', '硬盘使用率') }}</th>
                     <th>操作</th>
                 </tr>
             </thead>
