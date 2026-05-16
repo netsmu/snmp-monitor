@@ -70,7 +70,8 @@ def _get_snmp_engine():
 DEFAULT_CONFIG = {
     'interval': '60', 'per_page': '100', 'global_cpu': '90', 
     'global_mem': '90', 'global_disk': '90', 'max_fails': '10', 
-    'retention_days': '180', 'wechat_webhook': '', 'wechat_webhook2': ''
+    'retention_days': '180', 'wechat_webhook': '', 'wechat_webhook2': '',
+    'alert_hysteresis': '5'   # 告警回差（%），防止指标在阈值附近抖动时反复告警
 }
 
 def init_db():
@@ -107,21 +108,26 @@ def send_wechat_alert(content, msg_type="warning"):
         except Exception:
             pass
 
-def check_and_alert(device, metric_name, current_val, global_thresh, custom_thresh):
+def check_and_alert(device, metric_name, current_val, global_thresh, custom_thresh, hysteresis=5):
     thresh = custom_thresh if custom_thresh > 0 else global_thresh
+    # 恢复线 = 告警线 - 回差值，防止指标在阈值附近抖动时反复告警/恢复
+    recover_thresh = thresh - hysteresis
     cache_key = f"{device.ip}_{metric_name}"
     
     # 告警时附带设备名称，方便识别
     dev_label = f"{device.name}({device.ip})" if device.name else device.ip
     
     if current_val >= thresh:
+        # 超过告警线：仅在未告警状态时发送告警
         if cache_key not in alert_cache:
             send_wechat_alert(f"设备 [{dev_label}] {metric_name} 使用率过高: {current_val}% (阈值: {thresh}%)")
             alert_cache[cache_key] = True
-    else:
+    elif current_val < recover_thresh:
+        # 低于恢复线：仅在告警状态时发送恢复通知
         if cache_key in alert_cache:
             send_wechat_alert(f"设备 [{dev_label}] {metric_name} 使用率已恢复正常: {current_val}%", "info")
             del alert_cache[cache_key]
+    # 在告警线与恢复线之间（抖动区间）：保持当前状态，不发任何消息
 
 # ================= 真实 SNMP 采集模块 =================
 
@@ -266,6 +272,7 @@ def poll_all_devices():
         g_mem = get_config('global_mem')
         g_disk = get_config('global_disk')
         max_fails = get_config('max_fails')
+        g_hysteresis = get_config('alert_hysteresis')
 
     # 2. 每轮采集前清理上轮遗留的 SnmpEngine 缓存，防止内存泄漏
     #    （ThreadPoolExecutor 每轮创建新线程，旧线程的实例无法回收）
@@ -303,10 +310,10 @@ def poll_all_devices():
                 device.status = 'online'
                 device.fail_count = 0
 
-                check_and_alert(device, "CPU", cpu_usage, g_cpu, cpu_t)
-                check_and_alert(device, "内存", mem_usage, g_mem, mem_t)
+                check_and_alert(device, "CPU", cpu_usage, g_cpu, cpu_t, g_hysteresis)
+                check_and_alert(device, "内存", mem_usage, g_mem, mem_t, g_hysteresis)
                 for d in disk_data:
-                    check_and_alert(device, f"硬盘({d['name']})", d['usage'], g_disk, disk_t)
+                    check_and_alert(device, f"硬盘({d['name']})", d['usage'], g_disk, disk_t, g_hysteresis)
 
                 hist = History(device_id=device.id, cpu_usage=cpu_usage, mem_usage=mem_usage, disk_data=json.dumps(disk_data))
                 db.session.add(hist)
@@ -364,9 +371,9 @@ def index():
     # 搜索参数（模糊匹配名称或IP）
     q = request.args.get('q', '', type=str).strip()
 
-    # 排序参数
-    sort_by  = request.args.get('sort', 'id')        # 默认按 id 排序
-    sort_dir = request.args.get('dir',  'asc')       # 默认升序
+    # 排序参数（默认按内存使用率降序）
+    sort_by  = request.args.get('sort', 'mem_usage')
+    sort_dir = request.args.get('dir',  'desc')
     reverse  = (sort_dir == 'desc')
 
     # 基础查询（带搜索过滤）
@@ -391,8 +398,8 @@ def index():
     sort_col = SORT_FIELDS.get(sort_by, Device.id)
     order_expr = sort_col.desc() if reverse else sort_col.asc()
 
-    # CPU / 内存排序需要联合 History 表，单独处理
-    if sort_by in ('cpu_usage', 'mem_usage'):
+    # CPU / 内存 / 硬盘排序需要联合 History 表，单独处理
+    if sort_by in ('cpu_usage', 'mem_usage', 'disk_usage'):
         # 批量获取最新历史（消除 N+1）
         all_devices = base_query.all()
         device_ids = [d.id for d in all_devices]
@@ -402,6 +409,13 @@ def index():
             h = latest_map.get(dev.id)
             if h is None:
                 return -1.0
+            if sort_by == 'disk_usage':
+                # 硬盘按最高分区使用率排序
+                try:
+                    disks = json.loads(h.disk_data) if h.disk_data else []
+                    return max((d['usage'] for d in disks), default=0.0)
+                except (json.JSONDecodeError, TypeError, KeyError):
+                    return 0.0
             return getattr(h, sort_by) or 0.0
 
         all_devices.sort(key=sort_key, reverse=reverse)
