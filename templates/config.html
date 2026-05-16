@@ -32,6 +32,7 @@
                         <div class="col"><label>全局硬盘报警阈值(%)</label><input type="number" name="global_disk" class="form-control" value="{{ configs.global_disk }}"></div>
                     </div>
                     <div class="row mb-3">
+                        <div class="col"><label>告警回差 (%)</label><input type="number" name="alert_hysteresis" class="form-control" min="0" max="20" value="{{ configs.alert_hysteresis }}"></div>
                         <div class="col"><label>连续几次无响应判定离线</label><input type="number" name="max_fails" class="form-control" value="{{ configs.max_fails }}"></div>
                         <div class="col"><label>历史数据保留 (天)</label><input type="number" name="retention_days" class="form-control" value="{{ configs.retention_days }}"></div>
                     </div>
